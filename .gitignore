@@ -1,0 +1,6 @@
+venv
+sessions
+json
+__pycache__
+.env
+locks
