@@ -1,9 +1,27 @@
-import time,json, math, asyncio, httpx, numbers,re, random, pathlib, os, sys, tempfile
+import time,json, math, asyncio, httpx, numbers,re, random, pathlib, os, sys, tempfile, sqlite3
 # Fix Windows Terminal Encoding
 if sys.platform == "win32":
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
+def optimize_sqlite_session(session_path):
+    """
+    Mengaktifkan WAL mode dan busy_timeout pada file SQLite Telethon .session
+    agar mendukung pembacaan dan penulisan konkuren tanpa error 'database is locked'.
+    """
+    if not session_path:
+        return
+    db_file = session_path if session_path.endswith(".session") else f"{session_path}.session"
+    if os.path.exists(db_file):
+        try:
+            with sqlite3.connect(db_file, timeout=15) as conn:
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                conn.execute("PRAGMA busy_timeout=30000;")
+        except Exception:
+            pass
+
 from telethon import TelegramClient, Button, events, types, errors
 from telethon.errors import SessionPasswordNeededError, PasswordHashInvalidError, AuthKeyUnregisteredError
 from telethon.tl.functions.auth import SendCodeRequest, CheckPasswordRequest
@@ -160,6 +178,7 @@ async def init_bot(config_data):
         session_path = os.path.join(path, "sessions", "api_server")
         os.makedirs(session_path, exist_ok=True)
         bot_session_path = os.path.join(session_path, f"bot_{current_token.split(':')[0]}")
+        optimize_sqlite_session(bot_session_path)
         print(f"[*] Initializing API Bot for token {current_token[:10]}... (Session: {bot_session_path})")
         
         from telethon.network import connection
@@ -177,6 +196,11 @@ async def init_bot(config_data):
                 break
             except Exception as e:
                 print(f"[!] API Bot {current_token[:10]} connection attempt {attempt+1} failed: {e}")
+                try:
+                    if new_bot and new_bot.is_connected():
+                        await new_bot.disconnect()
+                except Exception:
+                    pass
                 err_str = str(e).lower()
                 if "expired" in err_str or "invalid" in err_str or "unauthorized" in err_str:
                     print(f"[!] Token {current_token[:10]} kedaluwarsa atau tidak valid. Hentikan percobaan.")
@@ -278,14 +302,19 @@ async def send_otp():
     from telethon.network import connection
     acc = None
     try:
-        acc = TelegramClient(os.path.join(paths['sessions'], phone), curr_api_id, curr_api_hash, connection=connection.ConnectionTcpIntermediate)
+        session_file = os.path.join(paths['sessions'], phone)
+        optimize_sqlite_session(session_file)
+        acc = TelegramClient(session_file, curr_api_id, curr_api_hash, connection=connection.ConnectionTcpIntermediate)
         for _ in range(3):
             try:
                 await acc.connect()
                 if await acc.is_user_authorized() or not await acc.is_user_authorized(): 
                     break # if it doesn't throw, it's connected
-            except Exception:
-                await asyncio.sleep(1)
+            except Exception as e:
+                if "database is locked" in str(e).lower():
+                    await asyncio.sleep(1.5)
+                else:
+                    await asyncio.sleep(1)
                 
         if not acc.is_connected():
             return jsonify({'status': 'error', 'message': 'Gagal terhubung ke server Telegram. Silakan coba lagi.'}), 502
@@ -327,14 +356,19 @@ async def verify_otp():
         return jsonify({'status': 'error', 'message': 'OTP not requested for this phone'})
     
     from telethon.network import connection
-    acc = TelegramClient(os.path.join(paths['sessions'], phone), api_id, api_hash, connection=connection.ConnectionTcpIntermediate)
+    session_file = os.path.join(paths['sessions'], phone)
+    optimize_sqlite_session(session_file)
+    acc = TelegramClient(session_file, api_id, api_hash, connection=connection.ConnectionTcpIntermediate)
     for _ in range(3):
         try:
             await acc.connect()
             if await acc.is_user_authorized() or not await acc.is_user_authorized(): 
                 break
-        except Exception:
-            await asyncio.sleep(1)
+        except Exception as e:
+            if "database is locked" in str(e).lower():
+                await asyncio.sleep(1.5)
+            else:
+                await asyncio.sleep(1)
             
     if not acc.is_connected():
         return jsonify({'status': 'error', 'message': 'Cannot connect to Telegram servers. Please try again.'})
@@ -411,14 +445,19 @@ async def verify_password():
         return jsonify({'status': 'error', 'message': 'OTP not requested for this phone'})
     
     from telethon.network import connection
-    acc = TelegramClient(os.path.join(paths['sessions'], phone), api_id, api_hash, connection=connection.ConnectionTcpIntermediate)
+    session_file = os.path.join(paths['sessions'], phone)
+    optimize_sqlite_session(session_file)
+    acc = TelegramClient(session_file, api_id, api_hash, connection=connection.ConnectionTcpIntermediate)
     for _ in range(3):
         try:
             await acc.connect()
             if await acc.is_user_authorized() or not await acc.is_user_authorized(): 
                 break
-        except Exception:
-            await asyncio.sleep(1)
+        except Exception as e:
+            if "database is locked" in str(e).lower():
+                await asyncio.sleep(1.5)
+            else:
+                await asyncio.sleep(1)
             
     if not acc.is_connected():
         return jsonify({'status': 'error', 'message': 'Cannot connect to Telegram servers. Please try again.'})

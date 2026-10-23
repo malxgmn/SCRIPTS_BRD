@@ -36,20 +36,20 @@ ls -dt "$PROJECT_DIR"/json_backup_* 2>/dev/null | tail -n +6 | xargs rm -rf 2>/d
 # 2️⃣ HENTIKAN LAYANAN LAMA (ANTI-ZOMBIE PROCESS)
 # ---------------------------------------------------------
 echo "[+] Stopping previous Python processes gracefully..."
-fuser -k 5000/tcp 2>/dev/null || true
-pkill -SIGTERM -f "$PROJECT_DIR/setup.py" || true
-pkill -SIGTERM -f "$PROJECT_DIR/main.py" || true
-pkill -SIGTERM -f "$PROJECT_DIR/api.py" || true
-pkill -SIGTERM -f "python.*$PROJECT_DIR" || true
+sudo fuser -k 5000/tcp 2>/dev/null || fuser -k 5000/tcp 2>/dev/null || true
+sudo pkill -SIGTERM -f "$PROJECT_DIR/setup.py" 2>/dev/null || pkill -SIGTERM -f "$PROJECT_DIR/setup.py" 2>/dev/null || true
+sudo pkill -SIGTERM -f "$PROJECT_DIR/main.py" 2>/dev/null || pkill -SIGTERM -f "$PROJECT_DIR/main.py" 2>/dev/null || true
+sudo pkill -SIGTERM -f "$PROJECT_DIR/api.py" 2>/dev/null || pkill -SIGTERM -f "$PROJECT_DIR/api.py" 2>/dev/null || true
+sudo pkill -SIGTERM -f "python.*$PROJECT_DIR" 2>/dev/null || pkill -SIGTERM -f "python.*$PROJECT_DIR" 2>/dev/null || true
 
 echo "[*] Waiting 3 seconds for file write completion..."
 sleep 3
 
-fuser -k -9 5000/tcp 2>/dev/null || true
-pkill -9 -f "$PROJECT_DIR/setup.py" || true
-pkill -9 -f "$PROJECT_DIR/main.py" || true
-pkill -9 -f "$PROJECT_DIR/api.py" || true
-pkill -9 -f "python.*$PROJECT_DIR" || true
+sudo fuser -k -9 5000/tcp 2>/dev/null || fuser -k -9 5000/tcp 2>/dev/null || true
+sudo pkill -9 -f "$PROJECT_DIR/setup.py" 2>/dev/null || pkill -9 -f "$PROJECT_DIR/setup.py" 2>/dev/null || true
+sudo pkill -9 -f "$PROJECT_DIR/main.py" 2>/dev/null || pkill -9 -f "$PROJECT_DIR/main.py" 2>/dev/null || true
+sudo pkill -9 -f "$PROJECT_DIR/api.py" 2>/dev/null || pkill -9 -f "$PROJECT_DIR/api.py" 2>/dev/null || true
+sudo pkill -9 -f "python.*$PROJECT_DIR" 2>/dev/null || pkill -9 -f "python.*$PROJECT_DIR" 2>/dev/null || true
 sleep 1
 
 # ---------------------------------------------------------

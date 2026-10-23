@@ -9,6 +9,27 @@ import random
 import urllib.request
 import urllib.error
 import ssl
+import sqlite3
+
+def migrate_all_sessions_to_wal(sessions_dir):
+    """Aktifkan WAL mode untuk seluruh file .session yang ada di folder sessions/"""
+    if not os.path.exists(sessions_dir):
+        return
+    count = 0
+    for root, _, files in os.walk(sessions_dir):
+        for f in files:
+            if f.endswith(".session"):
+                fpath = os.path.join(root, f)
+                try:
+                    with sqlite3.connect(fpath, timeout=5) as conn:
+                        conn.execute("PRAGMA journal_mode=WAL;")
+                        conn.execute("PRAGMA synchronous=NORMAL;")
+                        conn.execute("PRAGMA busy_timeout=30000;")
+                    count += 1
+                except Exception:
+                    pass
+    if count > 0:
+        print(f"[✔] SQLite WAL mode activated for {count} session databases.")
 
 # Global list to track all spawned subprocesses for clean shutdown
 ALL_PROCESSES = []
@@ -56,6 +77,7 @@ class BotManager:
         self.python_exe = python_exe
         self.scripts_dir = scripts_dir
         self.processes = {}  # {tenant_id: process_object}
+        self.spawning_tenants = set()  # Mutex set untuk mencegah duplikasi subprocess bot
         self.running = True
         self.last_config = {}  # {tenant_id: config_hash}
         self.retry_cooldown = {}  # {tenant_id: next_allowed_retry_timestamp}
@@ -123,21 +145,24 @@ class BotManager:
 
     def spawn_bot(self, t):
         tid = str(t['id'])
-        delay = random.uniform(1.0, 5.0)
-        print(f"[*] Queuing Watcher for Tenant {tid} (@{t['bot_username']}) with {delay:.1f}s jitter...")
-        time.sleep(delay)
-        
-        cmd = [
-            self.python_exe, "-u", "main.py",
-            "--api_id", str(t['api_id']),
-            "--api_hash", str(t['api_hash']),
-            "--bot_token", str(t['bot_token']),
-            "--bot_username", str(t['bot_username']),
-            "--admin_ids", str(t['admin_ids']),
-            "--tenant_id", tid
-        ]
-        
+        if tid in self.spawning_tenants:
+            return
+        self.spawning_tenants.add(tid)
         try:
+            delay = random.uniform(0.5, 3.0)
+            print(f"[*] Queuing Watcher for Tenant {tid} (@{t['bot_username']}) with {delay:.1f}s jitter...")
+            time.sleep(delay)
+            
+            cmd = [
+                self.python_exe, "-u", "main.py",
+                "--api_id", str(t['api_id']),
+                "--api_hash", str(t['api_hash']),
+                "--bot_token", str(t['bot_token']),
+                "--bot_username", str(t['bot_username']),
+                "--admin_ids", str(t['admin_ids']),
+                "--tenant_id", tid
+            ]
+            
             p = subprocess.Popen(
                 cmd,
                 cwd=self.scripts_dir,
@@ -161,6 +186,8 @@ class BotManager:
             print(f"[✔] Watcher for Tenant {tid} (@{t['bot_username']}) SPAWNED!")
         except Exception as e:
             print(f"[!] Failed to spawn bot for Tenant {tid}: {e}")
+        finally:
+            self.spawning_tenants.discard(tid)
 
     def restart_bot(self, t, reason="config change"):
         tid = str(t['id'])
@@ -211,16 +238,18 @@ class BotManager:
                 config_changed = (tid in self.last_config and self.last_config[tid] != current_config_hash)
                 
                 if config_changed:
-                    # Konfigurasi diubah oleh admin di Admin Panel! Reset cooldown dan restart instan
-                    self.retry_cooldown.pop(tid, None)
-                    threading.Thread(target=self.restart_bot, args=(t, "config change in admin"), daemon=True).start()
+                    if tid not in self.spawning_tenants:
+                        # Konfigurasi diubah oleh admin di Admin Panel! Reset cooldown dan restart instan
+                        self.retry_cooldown.pop(tid, None)
+                        threading.Thread(target=self.restart_bot, args=(t, "config change in admin"), daemon=True).start()
                 elif p is None:
-                    threading.Thread(target=self.spawn_bot, args=(t,), daemon=True).start()
+                    if tid not in self.spawning_tenants:
+                        threading.Thread(target=self.spawn_bot, args=(t,), daemon=True).start()
                 elif p.poll() is not None:
                     # Proses bot mati/crash (misal token expired). Terapkan cooldown 3 menit
                     now = time.time()
                     next_retry = self.retry_cooldown.get(tid, 0)
-                    if now >= next_retry:
+                    if now >= next_retry and tid not in self.spawning_tenants:
                         self.retry_cooldown[tid] = now + 180
                         print(f"[*] Tenant {tid} bot is down. Retrying spawn (cooldown 3m)...")
                         threading.Thread(target=self.spawn_bot, args=(t,), daemon=True).start()
@@ -285,6 +314,9 @@ def main():
         if os.path.exists(p): venv_python = p
     
     python_exe = venv_python if venv_python else sys.executable
+
+    # Migrasi seluruh SQLite Telethon Session ke WAL mode
+    migrate_all_sessions_to_wal(os.path.join(scripts_dir, "sessions"))
 
     # Jalankan Python API
     python_api_cmd = [python_exe, "-u", os.path.join(scripts_dir, "api.py")]

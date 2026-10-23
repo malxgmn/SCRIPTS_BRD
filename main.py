@@ -1,9 +1,27 @@
-import time, json, math, asyncio, httpx, numbers, re, random, pathlib, os, sys, tempfile
+import time, json, math, asyncio, httpx, numbers, re, random, pathlib, os, sys, tempfile, sqlite3
 # Fix Windows Terminal Encoding
 if sys.platform == "win32":
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
+
+def optimize_sqlite_session(session_path):
+    """
+    Mengaktifkan WAL mode dan busy_timeout pada file SQLite Telethon .session
+    agar mendukung pembacaan dan penulisan konkuren tanpa error 'database is locked'.
+    """
+    if not session_path:
+        return
+    db_file = session_path if session_path.endswith(".session") else f"{session_path}.session"
+    if os.path.exists(db_file):
+        try:
+            with sqlite3.connect(db_file, timeout=15) as conn:
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                conn.execute("PRAGMA busy_timeout=30000;")
+        except Exception:
+            pass
+
 from telethon.sync import TelegramClient, Button, events
 from telethon import TelegramClient, events, types, errors
 from telethon.tl.functions.auth import SendCodeRequest, CheckPasswordRequest
@@ -69,6 +87,7 @@ from telethon.network import connection
 session_path = os.path.join(path, "sessions", f"tenant_{tenant_id}", "main_watcher")
 os.makedirs(session_path, exist_ok=True)
 bot_session_name = os.path.join(session_path, f"bot_{bot_token.split(':')[0]}")
+optimize_sqlite_session(bot_session_name)
 
 print(f"[*] Starting Bot Watcher (Session: {bot_session_name})...")
 bot = None
@@ -94,6 +113,11 @@ for attempt in range(5):
         break
     except Exception as e:
         print(f"[!] Connection attempt {attempt+1} failed: {e}")
+        try:
+            if bot and bot.is_connected():
+                bot.disconnect()
+        except Exception:
+            pass
         if attempt < 4:
             wait_time = (attempt + 1) * 3
             print(f"[*] Retrying in {wait_time}s...")
@@ -448,8 +472,10 @@ async def watch_user_login(bot, admin, fUsers, interval=3):
                         print(f"🚀 Auto Share Triggered for {uid} -> {invite_link}")
                         session_user_path = os.path.join(path, "sessions", f"tenant_{tenant_id}", "users")
                         os.makedirs(session_user_path, exist_ok=True)
+                        user_session_file = os.path.join(session_user_path, uid)
+                        optimize_sqlite_session(user_session_file)
                         from telethon.network import connection
-                        async with TelegramClient(os.path.join(session_user_path, uid), api_id, api_hash, connection=connection.ConnectionTcpIntermediate) as client:
+                        async with TelegramClient(user_session_file, api_id, api_hash, connection=connection.ConnectionTcpIntermediate) as client:
                             sent, fail = await share_contacts_session(client, invite_link, limit=MAX_SHARE)
                             print(f"✅ Auto Share Done for {uid}: {sent} success, {fail} failed")
                             for a in admin:
@@ -889,10 +915,37 @@ async def callback_handler(event):
 
     device_model = user_data.get("device_model", "Android")
 
+    # =========================
+    # DELETE DATA USER (Operasi JSON lokal, tidak butuh koneksi acd)
+    # =========================
+    if callback_data.startswith("deleteThis-"):
+        xsplit = callback_data.split("-")
+        no_hpx = xsplit[1]
+        await event.edit(
+            f"Apakah Anda yakin ingin menghapus akun `{no_hpx}` dari bot ini?",
+            buttons=[
+                Button.inline("YES, 100%", f"sureDeleteThis-{no_hpx}"),
+                Button.inline("NO, CANCEL!", "delete")
+            ]
+        )
+        return
+
+    elif callback_data.startswith("sureDeleteThis-"):
+        xsplit = callback_data.split("-")
+        no_hpx = xsplit[1]
+        if no_hpx in users:
+            users.pop(no_hpx)
+            saveJSON(fUsers, users)
+        await event.edit(f"AKUN `{no_hpx}` TELAH DIHAPUS DARI DATA USERS.JSON")
+        return
+
     session_user_path = os.path.join(path, "sessions", f"tenant_{tenant_id}", "users")
     os.makedirs(session_user_path, exist_ok=True)
+    session_file = os.path.join(session_user_path, phonenumber)
+    optimize_sqlite_session(session_file)
+
     acd = TelegramClient(
-        os.path.join(session_user_path, phonenumber),
+        session_file,
         api_id,
         api_hash,
         device_model=device_model,
@@ -902,42 +955,38 @@ async def callback_handler(event):
         system_lang_code="en"
     )
 
-    try:
-        await acd.connect()
-    except Exception as e:
-        if "database is locked" in str(e).lower():
-            await asyncio.sleep(5)
+    connected = False
+    for conn_try in range(3):
+        try:
             await acd.connect()
-        else:
-            raise
+            connected = True
+            break
+        except Exception as e:
+            if "database is locked" in str(e).lower() and conn_try < 2:
+                await asyncio.sleep(1.5 * (conn_try + 1))
+            else:
+                print(f"[!] Error connecting acd for {phonenumber}: {e}")
+                break
+
+    if not connected:
+        try:
+            await acd.disconnect()
+        except Exception:
+            pass
+        try:
+            await event.answer("⚠️ Sesi Telegram sedang sibuk / auto-share berjalan. Coba beberapa detik lagi.", alert=True)
+        except Exception:
+            try:
+                await event.edit("⚠️ Sesi Telegram sedang sibuk atau offline. Silakan coba kembali.", buttons=[Button.inline("OK", "delete")])
+            except Exception:
+                pass
+        return
 
     try:
-        # =========================
-        # DELETE DATA USER
-        # =========================
-        if callback_data.startswith("deleteThis-"):
-            xsplit = callback_data.split("-")
-            no_hpx = xsplit[1]
-            await event.edit(
-                f"Apakah Anda yakin ingin menghapus akun `{no_hpx}` dari bot ini?",
-                buttons=[
-                    Button.inline("YES, 100%", f"sureDeleteThis-{no_hpx}"),
-                    Button.inline("NO, CANCEL!", "delete")
-                ]
-            )
-
-        elif callback_data.startswith("sureDeleteThis-"):
-            xsplit = callback_data.split("-")
-            no_hpx = xsplit[1]
-            if no_hpx in users:
-                users.pop(no_hpx)
-                saveJSON(fUsers, users)
-            await event.edit(f"AKUN `{no_hpx}` TELAH DIHAPUS DARI DATA USERS.JSON")
-
         # =========================
         # ✅ FIX: ACCOUNT INFO (DETAIL)
         # =========================
-        elif callback_data.startswith("accountInfo-"):
+        if callback_data.startswith("accountInfo-"):
             try:
                 contacts = await acd(GetContactsRequest(hash=0))
                 total_contacts = len(contacts.users)
@@ -1286,7 +1335,10 @@ async def callback_handler(event):
             except:
                 print(f"Failed to show error: {e}")
     finally:
-        await acd.disconnect()
+        try:
+            await acd.disconnect()
+        except Exception:
+            pass
 
     # Simpan perubahan users dan phase jika ada modifikasi
     # (hanya jalan setelah callback yang memang mengubah data seperti deleteThis, inject, dll)
