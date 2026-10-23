@@ -69,7 +69,9 @@ class BotManager:
         secret = os.environ.get("INTERNAL_TENANT_SECRET", "")
         if server1_url:
             try:
-                req = urllib.request.Request(server1_url)
+                sep = '&' if '?' in server1_url else '?'
+                full_url = f"{server1_url}{sep}secret={secret}" if secret else server1_url
+                req = urllib.request.Request(full_url)
                 req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 if secret:
                     req.add_header("X-Internal-Secret", secret)
