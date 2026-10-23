@@ -4,7 +4,7 @@
 
 set -e
 
-PROJECT_DIR="/var/www/SCRIPTS_BRD"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$PROJECT_DIR/venv"
 LOG_FILE="$PROJECT_DIR/core_brd.log"
 APP_NAME="core_brd"
@@ -13,7 +13,7 @@ echo "=========================================="
 echo "   MALXGMN EMPIRE - SERVER 2 (BRD CORE)   "
 echo "=========================================="
 
-echo "[+] Moving to core directory..."
+echo "[+] Moving to core directory: $PROJECT_DIR"
 cd "$PROJECT_DIR" || { echo "[!] Directory not found: $PROJECT_DIR"; exit 1; }
 
 # ---------------------------------------------------------
@@ -36,16 +36,20 @@ ls -dt "$PROJECT_DIR"/json_backup_* 2>/dev/null | tail -n +6 | xargs rm -rf 2>/d
 # 2️⃣ HENTIKAN LAYANAN LAMA (ANTI-ZOMBIE PROCESS)
 # ---------------------------------------------------------
 echo "[+] Stopping previous Python processes gracefully..."
+fuser -k 5000/tcp 2>/dev/null || true
 pkill -SIGTERM -f "$PROJECT_DIR/setup.py" || true
 pkill -SIGTERM -f "$PROJECT_DIR/main.py" || true
 pkill -SIGTERM -f "$PROJECT_DIR/api.py" || true
+pkill -SIGTERM -f "python.*$PROJECT_DIR" || true
 
-echo "[*] Waiting 5 seconds for file write completion..."
-sleep 5
+echo "[*] Waiting 3 seconds for file write completion..."
+sleep 3
 
+fuser -k -9 5000/tcp 2>/dev/null || true
 pkill -9 -f "$PROJECT_DIR/setup.py" || true
 pkill -9 -f "$PROJECT_DIR/main.py" || true
 pkill -9 -f "$PROJECT_DIR/api.py" || true
+pkill -9 -f "python.*$PROJECT_DIR" || true
 sleep 1
 
 # ---------------------------------------------------------

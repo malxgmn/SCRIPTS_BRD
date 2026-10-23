@@ -8,6 +8,7 @@ import signal
 import random
 import urllib.request
 import urllib.error
+import ssl
 
 # Global list to track all spawned subprocesses for clean shutdown
 ALL_PROCESSES = []
@@ -69,9 +70,15 @@ class BotManager:
         if server1_url:
             try:
                 req = urllib.request.Request(server1_url)
+                req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 if secret:
                     req.add_header("X-Internal-Secret", secret)
-                with urllib.request.urlopen(req, timeout=10) as response:
+                
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+
+                with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
                     if response.status == 200:
                         tenants = json.loads(response.read().decode('utf-8'))
                         # Simpan cache lokal untuk emergency fallback jika Server 1 offline
@@ -266,7 +273,7 @@ def main():
     python_exe = venv_python if venv_python else sys.executable
 
     # Jalankan Python API
-    python_api_cmd = [python_exe, "-u", "api.py"]
+    python_api_cmd = [python_exe, "-u", os.path.join(scripts_dir, "api.py")]
     threading.Thread(target=run_command, args=(python_api_cmd, scripts_dir, "PYTHON_API"), daemon=True).start()
     time.sleep(3)
 
