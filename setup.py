@@ -103,7 +103,7 @@ class BotManager:
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
 
-                with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
+                with urllib.request.urlopen(req, timeout=25, context=ctx) as response:
                     if response.status == 200:
                         tenants = json.loads(response.read().decode('utf-8'))
                         # Simpan cache lokal untuk emergency fallback jika Server 1 offline

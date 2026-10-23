@@ -118,6 +118,10 @@ for attempt in range(5):
                 bot.disconnect()
         except Exception:
             pass
+        err_str = str(e).lower()
+        if "expired" in err_str or "invalid" in err_str or "unauthorized" in err_str:
+            print(f"[!] Token Bot untuk Tenant {tenant_id} kedaluwarsa atau tidak valid di Telegram. Silakan periksa bot_token pada pengaturan tenant di Admin Panel.")
+            exit(1)
         if attempt < 4:
             wait_time = (attempt + 1) * 3
             print(f"[*] Retrying in {wait_time}s...")
