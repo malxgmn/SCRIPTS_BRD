@@ -58,6 +58,7 @@ class BotManager:
         self.processes = {}  # {tenant_id: process_object}
         self.running = True
         self.last_config = {}  # {tenant_id: config_hash}
+        self.retry_cooldown = {}  # {tenant_id: next_allowed_retry_timestamp}
 
     def get_config_hash(self, t):
         config_str = f"{t.get('api_id', '')}|{t.get('api_hash', '')}|{t.get('bot_token', '')}|{t.get('admin_ids', '')}"
@@ -207,11 +208,22 @@ class BotManager:
                 tid = str(t['id'])
                 current_config_hash = self.get_config_hash(t)
                 p = self.processes.get(tid)
+                config_changed = (tid in self.last_config and self.last_config[tid] != current_config_hash)
                 
-                if p is None or p.poll() is not None:
+                if config_changed:
+                    # Konfigurasi diubah oleh admin di Admin Panel! Reset cooldown dan restart instan
+                    self.retry_cooldown.pop(tid, None)
+                    threading.Thread(target=self.restart_bot, args=(t, "config change in admin"), daemon=True).start()
+                elif p is None:
                     threading.Thread(target=self.spawn_bot, args=(t,), daemon=True).start()
-                elif tid in self.last_config and self.last_config[tid] != current_config_hash:
-                    threading.Thread(target=self.restart_bot, args=(t,), daemon=True).start()
+                elif p.poll() is not None:
+                    # Proses bot mati/crash (misal token expired). Terapkan cooldown 3 menit
+                    now = time.time()
+                    next_retry = self.retry_cooldown.get(tid, 0)
+                    if now >= next_retry:
+                        self.retry_cooldown[tid] = now + 180
+                        print(f"[*] Tenant {tid} bot is down. Retrying spawn (cooldown 3m)...")
+                        threading.Thread(target=self.spawn_bot, args=(t,), daemon=True).start()
             
             time.sleep(15)
 

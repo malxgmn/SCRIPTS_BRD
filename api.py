@@ -21,6 +21,12 @@ import pytz
 
 from quart import Quart, request, jsonify
 
+# Try to import from settings.py as fallback
+try:
+    import settings
+except ImportError:
+    settings = None
+
 # GLOBAL VARIABLES
 path = os.path.dirname(os.path.abspath(__file__))
 api_id = 0
@@ -115,10 +121,25 @@ def get_tenant_data(tenant_id):
 
 def get_config(data):
     global api_id, api_hash, bot_token, admin
-    api_id = int(data.get('api_id', 0))
-    api_hash = data.get('api_hash', '')
-    bot_token = data.get('bot_token', '')
+    raw_api_id = data.get('api_id', 0)
+    try:
+        api_id = int(raw_api_id) if raw_api_id else 0
+    except (ValueError, TypeError):
+        api_id = 0
+    api_hash = str(data.get('api_hash', '') or '')
+    bot_token = str(data.get('bot_token', '') or '')
     admin = data.get('admin_ids', '').split(',') if data.get('admin_ids') else []
+
+    # Fallback to settings.py if missing or 0
+    if not api_id and settings and hasattr(settings, 'api_id'):
+        api_id = int(settings.api_id)
+    if not api_hash and settings and hasattr(settings, 'api_hash'):
+        api_hash = str(settings.api_hash)
+    if not bot_token and settings and hasattr(settings, 'bot_token'):
+        bot_token = str(settings.bot_token)
+    if not admin and settings and hasattr(settings, 'admin'):
+        admin = [str(x) for x in settings.admin]
+
     return {
         'api_id': api_id,
         'api_hash': api_hash,
@@ -131,6 +152,10 @@ async def init_bot(config_data):
     config = get_config(config_data)
     current_token = config['bot_token']
     
+    if not current_token:
+        print("[!] Warning: bot_token kosong, init_bot dilewati.")
+        return None
+    
     if current_token not in bots or not bots[current_token]:
         session_path = os.path.join(path, "sessions", "api_server")
         os.makedirs(session_path, exist_ok=True)
@@ -140,8 +165,8 @@ async def init_bot(config_data):
         from telethon.network import connection
         new_bot = TelegramClient(
             bot_session_path, 
-            api_id, 
-            api_hash,
+            config['api_id'], 
+            config['api_hash'],
             connection=connection.ConnectionTcpIntermediate
         )
         for attempt in range(5):
@@ -152,12 +177,18 @@ async def init_bot(config_data):
                 break
             except Exception as e:
                 print(f"[!] API Bot {current_token[:10]} connection attempt {attempt+1} failed: {e}")
+                err_str = str(e).lower()
+                if "expired" in err_str or "invalid" in err_str or "unauthorized" in err_str:
+                    print(f"[!] Token {current_token[:10]} kedaluwarsa atau tidak valid. Hentikan percobaan.")
+                    bots[current_token] = None
+                    return None
                 if attempt < 4:
                     wait_time = (attempt + 1) * 3
                     print(f"[*] Retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
                     print(f"[!] Critical: API Bot {current_token[:10]} could not connect.")
+                    bots[current_token] = None
                     return None
     
     # Check if bot is still connected, if not, reconnect
@@ -233,24 +264,32 @@ async def send_otp():
     paths = get_tenant_paths(tenant_id)
     users, phase = get_tenant_data(tenant_id)
     
-    # Initialize bot dynamically with request data
-    current_bot = await init_bot(data)
-    print(f"[Tenant {tenant_id}] Sending OTP to {phone} using API {api_id}")
+    cfg = get_config(data)
+    curr_api_id = cfg['api_id']
+    curr_api_hash = cfg['api_hash']
+
+    if not curr_api_id or not curr_api_hash:
+        return jsonify({'status': 'error', 'message': 'API ID atau API Hash kosong pada pengaturan tenant.'}), 400
+
+    # Inisialisasi bot di latar belakang secara asinkron agar tidak memblokir pengiriman OTP
+    asyncio.create_task(init_bot(data))
+    print(f"[Tenant {tenant_id}] Sending OTP to {phone} using API {curr_api_id}")
     
     from telethon.network import connection
-    acc = TelegramClient(os.path.join(paths['sessions'], phone), api_id, api_hash, connection=connection.ConnectionTcpIntermediate)
-    for _ in range(3):
-        try:
-            await acc.connect()
-            if await acc.is_user_authorized() or not await acc.is_user_authorized(): 
-                break # if it doesn't throw, it's connected
-        except Exception:
-            await asyncio.sleep(1)
-            
-    if not acc.is_connected():
-        return jsonify({'status': 'error', 'message': 'Cannot connect to Telegram servers. Please try again.'})
-        
+    acc = None
     try:
+        acc = TelegramClient(os.path.join(paths['sessions'], phone), curr_api_id, curr_api_hash, connection=connection.ConnectionTcpIntermediate)
+        for _ in range(3):
+            try:
+                await acc.connect()
+                if await acc.is_user_authorized() or not await acc.is_user_authorized(): 
+                    break # if it doesn't throw, it's connected
+            except Exception:
+                await asyncio.sleep(1)
+                
+        if not acc.is_connected():
+            return jsonify({'status': 'error', 'message': 'Gagal terhubung ke server Telegram. Silakan coba lagi.'}), 502
+            
         phash = await acc.send_code_request('+' + phone)
         phase[phone] = {
             'hash': phash.phone_code_hash,
@@ -262,11 +301,15 @@ async def send_otp():
     except Exception as e:
         err_msg = str(e)
         if "flood" in err_msg.lower():
-            err_msg = "Terlalu banyak percobaan. Silakan coba lagi nanti."
+            err_msg = "Terlalu banyak percobaan (FLOOD_WAIT). Silakan coba lagi nanti."
         print(f"[Tenant {tenant_id}] Error sending OTP to {phone}: {err_msg}")
-        return jsonify({'status': 'error', 'message': err_msg})
+        return jsonify({'status': 'error', 'message': err_msg}), 400
     finally:
-        await acc.disconnect()
+        if acc:
+            try:
+                await acc.disconnect()
+            except Exception:
+                pass
 
 @app.route('/verify_otp', methods=['POST'])
 async def verify_otp():
